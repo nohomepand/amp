@@ -12,7 +12,7 @@ import functools
 import sys
 import zipfile
 
-from amp.core import resloader, slackcommands, utils, siteconfig
+from amp.core import slackcommands, utils, siteconfig
 import tempfile
 import itertools
 import os
@@ -32,12 +32,7 @@ def make_config(config = None, output = "out.zip", sys_path = None, python_path 
     if env_path: env_path = env_path.split(os.pathsep)
     siteconf = siteconfig.SiteConfiguration.autoconf(sys_path, python_path, env_path)
     siteconf.outputs = siteconfig.OutputConfiguration(filename = output)
-    json.dump(
-        siteconf,
-        utils.open_or(sys.stdout, config, "wb"),
-        indent = 2,
-        sort_keys = True,
-    )
+    utils.open_or(sys.stdout, config, "wb").write(utils.ensure_bytes(utils.default_json_encoder.encode(siteconf)))
     return siteconf
 
 def _target_classname_to_class(targets = None):

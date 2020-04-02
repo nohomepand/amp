@@ -6,17 +6,17 @@ Created on 2020/03/27
 '''
 from __future__ import absolute_import, print_function, unicode_literals
 
+import codecs
+import contextlib
+import copy
 import functools
 import inspect
+import json
 import os
 import re
 import sys
-import copy
-import zipfile
 import tempfile
-import contextlib
-import codecs
-
+import zipfile
 
 PY2 = sys.version_info.major == 2
 
@@ -112,6 +112,8 @@ def open_or(default = sys.stdout, output = None, file_mode = "wb", **file_kwargs
         return default
     else:
         return open(output, file_mode, **file_kwargs)
+
+default_json_encoder = json.JSONEncoder(sort_keys=True, indent=2, separators=(',', ':'))
 
 if PY2:
     import cStringIO  # @NoMove

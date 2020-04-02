@@ -30,23 +30,14 @@ def startup():
     DISTRIBUTION = json.loads(open(DISTRIBUTION_CONTAINER, "r").read())
     
     PYMODULE_CONTAINER = checkfile(joinpath("{{modules}}".format(**DISTRIBUTION["config"])))
-    PYEXTMODULE_CONTAINER = checkfile(joinpath("{{extmodules}}".format(**DISTRIBUTION["config"])))
-    DEPENDS_CONTAINER = checkfile(joinpath("{{depends}}".format(**DISTRIBUTION["config"])))
     
-    require_update = bool(os.environ.get("AMP_REQUIRE_UPDATE", ""))
-    EXPAND_DIR = joinpath("{distname}.exp")
-    if not isdir(EXPAND_DIR):
-        os.makedirs(EXPAND_DIR)
-        require_update = True
-    
+    EXPAND_DIR = joinpath(DISTRIBUTION["expand_dir"])
+    # require_update = bool(os.environ.get("AMP_REQUIRE_UPDATE", ""))
+    #  if not isdir(EXPAND_DIR):
+    #      os.makedirs(EXPAND_DIR)
+    #      require_update = True
+    #  
     checkfile(EXPAND_DIR, isdir)
-    
-    if require_update:
-        import zipfile
-        with zipfile.ZipFile(open(PYEXTMODULE_CONTAINER, "rb"), "r") as zin:
-            zin.extractall(EXPAND_DIR)
-        with zipfile.ZipFile(open(DEPENDS_CONTAINER, "rb"), "r") as zin:
-            zin.extractall(EXPAND_DIR)
     
     def unique_list_add(alist, *entries):
         for ent in entries:
@@ -118,6 +109,9 @@ PSHELL_BAT = """\
 @echo off
 :pseudo python shell
 setlocal
+set EXPAND_DIR=.\\{distname}.exp
+set PATH=%EXPAND_DIR%;%PATH%
+set PYTHONPATH=.\\{modules}
 set PYTHON={python_executable}
 set BOOTMOD={bootstrap_py_name}
 set PYTHONSTARTUP=%BOOTMOD%

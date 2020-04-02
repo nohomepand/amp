@@ -86,15 +86,11 @@ class OutputConfiguration(utils.AutoDict):
     class Default:
         override = True
         modules = "py"
-        extmodules = "pyext"
-        depends = "dep"
         distname = "dist.json"
         filename = "out.zip"
     
     def configured(self):
         assert self.modules, "No `modules` configuration"
-        assert self.extmodules, "No `extmodules` configuration"
-        assert self.depends, "No `depends` configuration"
         assert self.distname, "No `distname` configuration"
         assert self.filename, "No `filename` configuration"
 
@@ -196,26 +192,33 @@ class DumpObject(utils.Dict):
         siteconf.outputs.configured()
         self.siteconf = siteconf
         self.modules = utils.ZipOutput(compress = zipfile.ZIP_STORED)
-        self.extmodules = utils.ZipOutput(compress = zipfile.ZIP_STORED)
-        self.depends = utils.ZipOutput(compress = zipfile.ZIP_STORED)
+        #self.extmodules = utils.ZipOutput(compress = zipfile.ZIP_STORED)
+        #self.depends = utils.ZipOutput(compress = zipfile.ZIP_STORED)
         self.dist = utils.Dict(
             config = siteconf.outputs,
             py = utils.Dict(), # module, extmodules問わず
+            expand_dir = siteconf.outputs.distname + ".exp",
         )
+        self.outputfilename = utils.FilePath.ensure(self.siteconf.outputs.filename)
+        self.outputfilename.dirname().touch()
+        self.zout = utils.ZipOutput(self.outputfilename, zipfile.ZIP_DEFLATED)
         self.__closed = False
     
     def write_python(self, filename, modpath, zipsafe = True):
         zipsafe = bool(zipsafe)
-        print("DumpObject.write_python %s -> %s(%s)" % (filename, modpath, zipsafe))
         self.dist.py[modpath] = zipsafe
         if zipsafe:
+            print("DumpObject.write_python %s -> %s(%s)" % (filename, modpath, zipsafe))
             self.modules.writefile(filename, modpath)
         else:
-            self.extmodules.writefile(filename, modpath)
+            modpath = self.dist.expand_dir + "/" + modpath
+            print("DumpObject.write_python %s -> %s(%s)" % (filename, modpath, zipsafe))
+            self.zout.writefile(filename, modpath)
     
     def write_depends(self, filename, arcname):
+        arcname = self.dist.expand_dir + "/" + arcname
         print("DumpObject.write_depends%s -> %s" % (filename, arcname))
-        self.depends.writefile(filename, arcname)
+        self.zout.writefile(filename, arcname)
     
     def __enter__(self):
         return self
@@ -227,35 +230,21 @@ class DumpObject(utils.Dict):
         if self.__closed:
             return
         self.__closed = True
-        outputfilename = utils.FilePath.ensure(self.siteconf.outputs.filename)
-        outputfilename.dirname().touch()
-        with self.modules.closing() as modules, self.extmodules.closing() as extmodules, self.depends.closing() as depends:
-            with utils.ZipOutput(outputfilename, zipfile.ZIP_DEFLATED) as zout:
-                print("Adding %s" % self.siteconf.outputs.modules)
-                zout.writefile(modules.filename, self.siteconf.outputs.modules)
-                print("Adding %s" % self.siteconf.outputs.extmodules)
-                zout.writefile(extmodules.filename, self.siteconf.outputs.extmodules)
-                print("Adding %s" % self.siteconf.outputs.depends)
-                zout.writefile(depends.filename, self.siteconf.outputs.depends)
-                print("Adding %s" % self.siteconf.outputs.distname)
-                with zout.open(self.siteconf.outputs.distname, "w") as fp:
-                    json.dump(self.dist, fp, indent = 2)
-                with zout.open("bootstrap.py", "wb") as fp:
-                    src = template_bootstrap.BOOTSTRAP_PY.format(**self.siteconf.outputs)
-                    fp.write(utils.ensure_bytes(src))
-                with zout.open("winpshell.bat", "wb") as fp:
-                    src = template_bootstrap.PSHELL_BAT.format(
-                        python_executable = "python.exe",
-                        bootstrap_py_name = "bootstrap.py",
-                        **self.siteconf.outputs
-                    )
-                    fp.write(utils.ensure_bytes(src))
-                    
+        with self.modules.closing() as modules:
+            print("Adding %s" % self.siteconf.outputs.modules)
+            self.zout.writefile(modules.filename, self.siteconf.outputs.modules)
+            print("Adding %s" % self.siteconf.outputs.distname)
+            with self.zout.open(self.siteconf.outputs.distname, "w") as fp:
+                fp.write(utils.default_json_encoder.encode(self.dist))
+            with self.zout.open("bootstrap.py", "wb") as fp:
+                src = template_bootstrap.BOOTSTRAP_PY.format(**self.siteconf.outputs)
+                fp.write(utils.ensure_bytes(src))
+            with self.zout.open("winpshell.bat", "wb") as fp:
+                src = template_bootstrap.PSHELL_BAT.format(
+                    python_executable = "python.exe",
+                    bootstrap_py_name = "bootstrap.py",
+                    **self.siteconf.outputs
+                )
+                fp.write(utils.ensure_bytes(src))
+        self.zout.close()
         print("Finish %s" % self.siteconf.outputs.filename)
-
-# if __name__ == '__main__':
-#     px = SiteConfiguration.autoconf()
-#     px.outputs = OutputConfiguration()
-#     px.outputs.filename = "z:/out.zip"
-#     px.dump(PythonPackingConfiguration)
-#     
