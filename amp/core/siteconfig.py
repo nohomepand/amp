@@ -199,7 +199,7 @@ class DumpObject(utils.Dict):
             py = utils.Dict(), # module, extmodules問わず
             expand_dir = siteconf.outputs.distname + ".exp",
         )
-        self.outputfilename = utils.FilePath.ensure(self.siteconf.outputs.filename)
+        self.outputfilename = utils.FilePath.ensure(self.siteconf.outputs.filename).abspath()
         self.outputfilename.dirname().touch()
         self.zout = utils.ZipOutput(self.outputfilename, zipfile.ZIP_DEFLATED)
         self.__closed = False
