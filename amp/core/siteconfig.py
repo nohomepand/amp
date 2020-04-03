@@ -3,6 +3,8 @@
 Created on 2020/04/01
 
 @author: oreyou
+
+* AMPでパッケージングされるファイルの収集・分類・列挙を行うモジュール
 '''
 from __future__ import absolute_import, print_function, unicode_literals
 
@@ -15,6 +17,9 @@ from amp.core import utils, template_bootstrap
 
 
 class SiteConfiguration(utils.AutoDict):
+    """
+    パッケージングされるファイルの収集のための、収集対象の構成を表すもの
+    """
     class Default:
         packages = []
         outputs = None
@@ -27,7 +32,7 @@ class SiteConfiguration(utils.AutoDict):
             env_path = None,
         ):
         """
-        sys.path等から自動構成
+        sys.path等からこのクラスのインスタンスを生成する
         """
         packages = []
         packages.append(CommentLine(message = "begin sys.path"))
@@ -64,6 +69,9 @@ class SiteConfiguration(utils.AutoDict):
             self,
             targets = object,
         ):
+        """
+        収集対象のファイルを列挙する
+        """
         for pkg in self.packages:
             if not isinstance(pkg, targets):
                 continue
@@ -74,6 +82,9 @@ class SiteConfiguration(utils.AutoDict):
             self,
             targets = object,
         ):
+        """
+        収集対象のファイルを分類しつつパッケージを生成する
+        """
         with DumpObject(self) as dumpobj: 
             for pkg in self.packages:
                 if not isinstance(pkg, targets):
@@ -83,6 +94,9 @@ class SiteConfiguration(utils.AutoDict):
 
 @SiteConfiguration.register("outputs")
 class OutputConfiguration(utils.AutoDict):
+    """
+    パッケージングの出力の構成を表すもの
+    """
     class Default:
         override = True
         modules = "py"
@@ -96,10 +110,16 @@ class OutputConfiguration(utils.AutoDict):
 
 @SiteConfiguration.register("packages")
 class PackagesConfiguration(utils.AutoDict):
+    """
+    パッケージングの収集される要素のリストを表すもの
+    """
     class Default:
         items = []
 
 class PackingConfigration(utils.AutoDict):
+    """
+    Pythonモジュールや依存ファイルの収集と分類を表す構成の基底クラス
+    """
     class Default:
         type = None
         root = None
@@ -126,6 +146,9 @@ class PackingConfigration(utils.AutoDict):
 
 @PackagesConfiguration.register("comment")
 class CommentLine(PackingConfigration):
+    """
+    (internal) PackagesConfigurationの構成の一部としてコメント要素を表すもの
+    """
     class Default:
         message = ""
     
@@ -133,6 +156,9 @@ class CommentLine(PackingConfigration):
         return []
 
 class PythonPackingConfiguration(PackingConfigration):
+    """
+    Pythonモジュールの収集の構成を表すもの
+    """
     class Default(PackingConfigration):
         includes = [
             # ".*\\.py$", ".*\\.pyd$"
@@ -153,16 +179,25 @@ class PythonPackingConfiguration(PackingConfigration):
 
 @PackagesConfiguration.register("python-base")
 class PythonBasePackageConfig(PythonPackingConfiguration):
+    """
+    Pythonモジュールの site-packages以外のモジュールの収集の構成を表すもの
+    """
     class Default(PythonPackingConfiguration.Default):
         pass
 
 @PackagesConfiguration.register("site-packages")
 class PythonSitePackageConfig(PythonPackingConfiguration):
+    """
+    Pythonモジュールの site-packagesのモジュールの収集の構成を表すもの
+    """
     class Default(PythonPackingConfiguration.Default):
         pass
 
 @PackagesConfiguration.register("depends")
 class DependentPackageConfig(PackingConfigration):
+    """
+    依存ファイル(ネイティブライブラリやテキストコンテンツなど)の収集の構成を表すもの
+    """
     class Default(PackingConfigration.Default):
         subdir = False
     
@@ -185,7 +220,9 @@ class DependentPackageConfig(PackingConfigration):
             dumpobj.write_depends(ent, ent.relpath(self.root))
 
 class DumpObject(utils.Dict):
-        
+    """
+    :func:`SiteConfiguration.dump` で、Pythonモジュール、Python拡張モジュール、依存ファイルを適切に格納するストレージを表すもの
+    """
     def __init__(self, siteconf):
         assert isinstance(siteconf, SiteConfiguration)
         assert siteconf.outputs, "`outputs` is not configured: siteconf.outputs=%s" % siteconf.outputs
@@ -205,6 +242,9 @@ class DumpObject(utils.Dict):
         self.__closed = False
     
     def write_python(self, filename, modpath, zipsafe = True):
+        """
+        このストレージへ Pythonモジュールを格納する
+        """
         zipsafe = bool(zipsafe)
         self.dist.py[modpath] = zipsafe
         if zipsafe:
@@ -216,6 +256,9 @@ class DumpObject(utils.Dict):
             self.zout.writefile(filename, modpath)
     
     def write_depends(self, filename, arcname):
+        """
+        このストレージへ依存ファイルを格納する
+        """
         arcname = self.dist.expand_dir + "/" + arcname
         print("DumpObject.write_depends%s -> %s" % (filename, arcname))
         self.zout.writefile(filename, arcname)
@@ -227,10 +270,13 @@ class DumpObject(utils.Dict):
         self.close()
     
     def close(self):
+        """
+        このストレージへの格納を完了し、AMPのパッケージファイルを生成する
+        """
         if self.__closed:
             return
         self.__closed = True
-        with self.modules.closing() as modules:
+        with self.modules.finishing() as modules:
             print("Adding %s" % self.siteconf.outputs.modules)
             self.zout.writefile(modules.filename, self.siteconf.outputs.modules)
             print("Adding %s" % self.siteconf.outputs.distname)

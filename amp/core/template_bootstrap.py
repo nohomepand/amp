@@ -3,6 +3,8 @@
 Created on date
 
 @author: oreyou
+
+* AMPの展開先用の起動スクリプトのテンプレート群
 '''
 from __future__ import unicode_literals, absolute_import, print_function
 
