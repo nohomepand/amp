@@ -6,7 +6,7 @@
 ```
 Z:\foo> python -m amp.cli config foobar.json
 .. edit foobar.json ..
-Z:\foo> python -m amp.cil compose foobar.json targets=PythonPackingConfiguration
+Z:\foo> python -m amp.cli compose foobar.json targets=PythonPackingConfiguration
 ```
 * *nix + cython (experimental)
 ```
