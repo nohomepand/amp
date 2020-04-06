@@ -14,7 +14,7 @@ import sys
 import zipfile
 
 from amp.core import utils, template_bootstrap
-
+from amp.bootup import blobstore
 
 class SiteConfiguration(utils.AutoDict):
     """
@@ -81,16 +81,18 @@ class SiteConfiguration(utils.AutoDict):
     def dump(
             self,
             targets = object,
+            storage_class = "ZipResourceComposer",
         ):
         """
         収集対象のファイルを分類しつつパッケージを生成する
         """
-        with DumpObject(self) as dumpobj: 
+        storage_class = globals()[storage_class] if isinstance(storage_class, utils.string_types) else storage_class
+        with storage_class(self) as storage: 
             for pkg in self.packages:
                 if not isinstance(pkg, targets):
                     continue
-                pkg.dump_to(dumpobj)
-            return dumpobj
+                pkg.dump_to(storage)
+            return storage
 
 @SiteConfiguration.register("outputs")
 class OutputConfiguration(utils.AutoDict):
@@ -142,7 +144,7 @@ class PackingConfigration(utils.AutoDict):
                 yield root
     
     def dump_to(self, dumpobj):
-        assert isinstance(dumpobj, DumpObject)
+        assert isinstance(dumpobj, ZipResourceComposer)
 
 @PackagesConfiguration.register("comment")
 class CommentLine(PackingConfigration):
@@ -171,11 +173,42 @@ class PythonPackingConfiguration(PackingConfigration):
         ]
         zipsafe = [".*\\.py$"]
     
+    PYTHON_MODULE_EXT = (
+        "py",
+        "pyd",
+    )
+    
+    
+    #region 相対ファイルパスから完全名を生成する
+    def py_to_fullname(self, relfilename):
+        if relfilename.namepart() == "__init__":
+            # モジュールはファイル名を含めない
+            # e.g path/to/module/__init__.py => path.to.module
+            return relfilename.replaced(namepart = "", extpart = "", ensure_abspath = False).replace("/", ".")
+        else:
+            # e.g path/to/module/foo.py => path.to.module.foo
+            return relfilename.replaced(extpart = "", ensure_abspath = False).replace("/", ".")
+    
+    def pyd_to_fullname(self, relfilename):
+        # e.g path/to/module/foo.arc-version-sig.pyd => path.to.module.foo
+        modname = relfilename.basename().split(".")[0]
+        pkgname = relfilename.dirname().replace("/", ".")
+        return (pkgname + "." + modname) if pkgname else modname
+    #endregion 相対ファイルパスから完全名を生成する
+    
     def dump_to(self, dumpobj):
         zipsafe = utils.PathMatcher(*self.zipsafe)
         for ent in self.iter_files():
             assert isinstance(ent, utils.FilePath)
-            dumpobj.write_python(ent, ent.relpath(self.root), zipsafe = zipsafe(ent))
+            relfilename = ent.relpath(self.root)
+            fullname_converter = getattr(self, "%s_to_fullname" % relfilename.extpart(), None)
+            fullname = None if not fullname_converter else fullname_converter(relfilename)
+            dumpobj.write_python(
+                ent,
+                relfilename,
+                fullname = fullname,
+                zipsafe = zipsafe(ent),
+            )
 
 @PackagesConfiguration.register("python-base")
 class PythonBasePackageConfig(PythonPackingConfiguration):
@@ -219,40 +252,90 @@ class DependentPackageConfig(PackingConfigration):
             assert isinstance(ent, utils.FilePath)
             dumpobj.write_depends(ent, ent.relpath(self.root))
 
-class DumpObject(utils.Dict):
+class AbstractResourceComposer(utils.Object):
     """
     :func:`SiteConfiguration.dump` で、Pythonモジュール、Python拡張モジュール、依存ファイルを適切に格納するストレージを表すもの
+    
+    :var siteconf: 格納中の :class:`SiteConfiguration` インスタンス
+    :var dist: このストレージを通して格納された要素を保存する :class:`utils.Dict` 型のインスタンス
+    
+    * `dist` は以下の構造を持つ
+    
+        {
+            config: 初期化時に渡された siteconfの siteconf.outputs の値,
+            files: {
+                [string: 格納されたファイルの格納時の相対パス]: [
+                    string: Pythonモジュールの fullname(格納されたファイルが Pythonモジュールの場合のみ),
+                    bool: ファイルがコンテナ内コンテナとして格納されていることを示す値,
+                ]
+            },
+            expand_dir: 展開時にコンテナ内コンテナ以外のファイルが展開される先の相対パス
+        }
+    
     """
-    def __init__(self, siteconf):
+    siteconf = None
+    dist = None
+    
+    def __init__(self, siteconf, **options):
+        utils.Object.__init__(self, **options)
         assert isinstance(siteconf, SiteConfiguration)
         assert siteconf.outputs, "`outputs` is not configured: siteconf.outputs=%s" % siteconf.outputs
         siteconf.outputs.configured()
         self.siteconf = siteconf
-        self.modules = utils.ZipOutput(compress = zipfile.ZIP_STORED)
-        #self.extmodules = utils.ZipOutput(compress = zipfile.ZIP_STORED)
-        #self.depends = utils.ZipOutput(compress = zipfile.ZIP_STORED)
         self.dist = utils.Dict(
             config = siteconf.outputs,
-            py = utils.Dict(), # module, extmodules問わず
+            files = utils.Dict(), # module, extmodules問わず
             expand_dir = siteconf.outputs.distname + ".exp",
+            composer = self.cls.__name__,
         )
+    
+    def add_distinfo(self, stored_filename, python_mod_fullname = None, zipsafe = False):
+        self.dist.files[stored_filename] = (python_mod_fullname, bool(zipsafe))
+    
+    def write_python(self, filename, modpath, fullname = None, zipsafe = True):
+        raise NotImplementedError("abstract")
+    
+    def write_depends(self, filename, arcname):
+        raise NotImplementedError("abstract")
+    
+    def close(self):
+        raise NotImplementedError("abstract")
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, etype, einst, etrace):
+        self.close()
+
+class ZipResourceComposer(AbstractResourceComposer):
+    """
+    このストレージは :func:`~write_python` で Pythonのローダで読み込み可能なモジュールを「Pythonモジュール」として ZIP-in-ZIPとして格納し、
+    :func:`~write_depends` で Pythonのローダで読み込めない依存コンテンツを ZIP内ファイルとして格納する。
+    wip
+    """
+    def __init__(self, siteconf, **options):
+        AbstractResourceComposer.__init__(self, siteconf, **options)
+        self.modules = utils.ZipOutput(compress = zipfile.ZIP_STORED)
         self.outputfilename = utils.FilePath.ensure(self.siteconf.outputs.filename).abspath()
         self.outputfilename.dirname().touch()
         self.zout = utils.ZipOutput(self.outputfilename, zipfile.ZIP_DEFLATED)
         self.__closed = False
     
-    def write_python(self, filename, modpath, zipsafe = True):
+    def write_python(self, filename, modpath, fullname = None, zipsafe = True):
         """
         このストレージへ Pythonモジュールを格納する
+        
+        `fullname` は、 `filename` およびそれが表す `modpath` がPythonモジュールである場合にのみ、
+        そのモジュールの完全名(dotted)を与えなければならない
         """
         zipsafe = bool(zipsafe)
-        self.dist.py[modpath] = zipsafe
+        self.add_distinfo(modpath, fullname, zipsafe)
         if zipsafe:
-            print("DumpObject.write_python %s -> %s(%s)" % (filename, modpath, zipsafe))
+            print("DumpObject.write_python %s -> %s(%s, %s)" % (filename, modpath, fullname, zipsafe))
             self.modules.writefile(filename, modpath)
         else:
             modpath = self.dist.expand_dir + "/" + modpath
-            print("DumpObject.write_python %s -> %s(%s)" % (filename, modpath, zipsafe))
+            print("DumpObject.write_python %s -> %s(%s, %s)" % (filename, modpath, fullname, zipsafe))
             self.zout.writefile(filename, modpath)
     
     def write_depends(self, filename, arcname):
@@ -262,12 +345,6 @@ class DumpObject(utils.Dict):
         arcname = self.dist.expand_dir + "/" + arcname
         print("DumpObject.write_depends%s -> %s" % (filename, arcname))
         self.zout.writefile(filename, arcname)
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, etype, einst, etrace):
-        self.close()
     
     def close(self):
         """
@@ -281,7 +358,8 @@ class DumpObject(utils.Dict):
             self.zout.writefile(modules.filename, self.siteconf.outputs.modules)
             print("Adding %s" % self.siteconf.outputs.distname)
             with self.zout.open(self.siteconf.outputs.distname, "w") as fp:
-                fp.write(utils.default_json_encoder.encode(self.dist))
+                fp.write(utils.short_json_encoder.encode(self.dist))
+            
             with self.zout.open("bootstrap.py", "wb") as fp:
                 src = template_bootstrap.BOOTSTRAP_PY.format(**self.siteconf.outputs)
                 fp.write(utils.ensure_bytes(src))
@@ -294,3 +372,13 @@ class DumpObject(utils.Dict):
                 fp.write(utils.ensure_bytes(src))
         self.zout.close()
         print("Finish %s" % self.siteconf.outputs.filename)
+
+class BlobStoreResourceComposer(ZipResourceComposer):
+    """
+    このストレージは :func:`~write_python` で Pythonのローダで読み込み可能なモジュールを「Pythonモジュール」として Blob-in-ZIPとして格納し、
+    :func:`~write_depends` で Pythonのローダで読み込めない依存コンテンツを ZIP内ファイルとして格納する。
+    (agonist of DumpObject)
+    """
+    def __init__(self, siteconf, **options):
+        ZipResourceComposer.__init__(self, siteconf, **options)
+        self.modules = utils.WrappedBlobWriter()

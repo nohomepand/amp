@@ -113,7 +113,8 @@ def compose(config = None, targets = None):
     """
     siteconf = load_config(config)
     targets = _target_classname_to_class(targets)
-    return siteconf.dump(targets)
+    return siteconf.dump(targets, "BlobStoreResourceComposer")
+    #return siteconf.dump(targets, "ZipResourceComposer")
 
 if __name__ == '__main__':
     try:
@@ -127,5 +128,5 @@ if __name__ == '__main__':
             else:
                 print(r)
     except slackcommands.NoSuchCommand as nsc:
-        print_usage()
+        print(print_usage())
         print(nsc)

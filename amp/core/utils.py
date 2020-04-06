@@ -19,6 +19,7 @@ import re
 import sys
 import tempfile
 import zipfile
+from amp.bootup import blobstore
 
 PY2 = sys.version_info.major == 2
 
@@ -131,6 +132,7 @@ def open_or(default = sys.stdout, output = None, file_mode = "wb", **file_kwargs
         return open(output, file_mode, **file_kwargs)
 
 default_json_encoder = json.JSONEncoder(sort_keys=True, indent=2, separators=(',', ':'))
+short_json_encoder = json.JSONEncoder(sort_keys=True, separators=(',', ':'))
 
 #region Py2k Py3k compat. type&functions
 if PY2:
@@ -181,11 +183,13 @@ ensure_fsencoding_str = functools.partial(ensure_str, encoding = fsencoding)
 ensure_fsencoding_text = functools.partial(ensure_text, encoding = fsencoding)
 #endregion Py2k Py3k compat. type&functions
 
-# def printf(msg, *args, **kwargs): unused
-#     f = inspect.currentframe().f_back
-#     kwargs.update(f.f_globals)
-#     kwargs.update(f.f_locals)
-#     print(msg.format(*args, **kwargs))
+def ellipse_str(it, length = 500, ellipsis = " .... ", to_str = repr):
+    s = to_str(it)
+    if len(s) > length:
+        hl = int((length - len(ellipsis)) / 2)
+        return s[:hl] + ellipsis + s[-hl:]
+    else:
+        return s
 
 class Object(object):
     """
@@ -200,8 +204,9 @@ class Object(object):
     attrs = property(lambda self: sorted(vars(self).items(), key = lambda e: e[0])) #: returns list of attrobite key-value tuple
     
     def __str__(self):
-        s = ", ".join(map(lambda kv: "%s=%r" % kv, self.attrs))
+        s = ", ".join(map(lambda kv: "%s=%s" % (kv[0], ellipse_str(kv[1])), self.attrs))
         return "{self.cls.__name__}({s})".format(**locals())
+    __repr__ = __str__
 
 class PathMatcher(Object):
     """
@@ -349,11 +354,58 @@ class FilePath(text_type):
         """
         return self.cls(os.path.basename(self.fsstr), **self.__dict__)
     
+    def name_ext_tuple(self):
+        """
+        このパスの終端のファイル要素を表すパス(ファイル名)のうち、拡張子を除いた名前と拡張子からなるタプルを得る;
+        拡張子が含まれない場合は、拡張子部分は空文字列となる
+        """
+        n, e = os.path.splitext(self.basename())
+        if e: e = e[1:] # remove first os.extsep
+        return n, e
+    
+    def namepart(self):
+        """
+        このパスの終端のファイル要素を表すパス(ファイル名)のうち、拡張子を除いた名前を得る
+        """
+        return self.name_ext_tuple()[0]
+    
+    def extpart(self):
+        """
+        このパスの終端のファイル要素を表すパス(ファイル名)のうち、拡張子を得る;
+        ファイル名に拡張子が含まれない場合は空の文字列が返却される
+        """
+        return self.name_ext_tuple()[1]
+    
     def dirname(self):
         """
         このパスのディレクトリ要素を表すパスを得る
         """
         return self.cls(os.path.dirname(self.fsstr), **self.__dict__)
+    
+    def components(self, ensure_abspath = False):
+        """
+        このパスのディレクトリ、ファイル(拡張子除)、拡張子に分解した 3-tupleを返却する
+        """
+        p = self.abspath() if ensure_abspath else self
+        dn = p.dirname()
+        name, ext = self.name_ext_tuple()
+        return dn, name, ext
+    
+    def replaced(self, dirname = None, namepart = None, extpart = None, ensure_abspath = True):
+        """
+        このパスのディレクトリ、ファイル(拡張子除)、拡張子を
+        """
+        p = self.abspath() if ensure_abspath else self
+        dn, name, ext = p.components()
+        if dirname is not None: dn = self.ensure(dirname)
+        if namepart is not None: name = namepart
+        if extpart is not None: ext = extpart
+        
+        name_ext = "%s%s%s" % (name, os.extsep, ext) if ext else name
+        if name_ext:
+            return dn.join(name_ext)
+        else:
+            return dn if not dn.endswith("/") else self.ensure(dn[:-1])
     
     def join(self, *subpath):
         """
@@ -395,9 +447,9 @@ class ZipOutput(object):
         """
         対象のファイル名、または一時ファイルとして初期化する
         """
-        self.__z = zipfile.ZipFile(zipfilename or tempfile.NamedTemporaryFile("wb", delete = False), "w", compress, True)
+        self.__out = zipfile.ZipFile(zipfilename or tempfile.NamedTemporaryFile("wb", delete = False), "w", compress, True)
         self.__is_tempfile = zipfilename is None
-        self.__filename = FilePath.ensure(self.__z.filename)
+        self.__filename = FilePath.ensure(self.__out.filename)
         self.packed = set()
     
     @property
@@ -412,7 +464,7 @@ class ZipOutput(object):
         """
         (internal) このオブジェクトで使用される :class:`zipfile.ZipFile` を得る
         """
-        return self.__z
+        return self.__out
     
     @property
     def filename(self):
@@ -427,15 +479,15 @@ class ZipOutput(object):
         """
         if self.is_closed:
             return
-        self.__z.close()
-        self.__z = None
+        self.__out.close()
+        self.__out = None
     
     @property
     def is_closed(self):
         """
         ZIPファイルへの書き込みが完了しているかを表す
         """
-        return self.__z is None
+        return self.__out is None
     
     @contextlib.contextmanager
     def finishing(self):
@@ -473,7 +525,7 @@ class ZipOutput(object):
             os.path.basename(srcfile)
         if not arcname in self.packed:
             self.packed.add(arcname)
-            self.__z.write(srcfile, arcname)
+            self.__out.write(srcfile, arcname)
     
     def writebytes(self, arcname, abytes = b""):
         """
@@ -481,7 +533,7 @@ class ZipOutput(object):
         """
         if not arcname in self.packed:
             self.packed.add(arcname)
-            self.__z.writestr(arcname, ensure_bytes(abytes))
+            self.__out.writestr(arcname, ensure_bytes(abytes))
     
     def writetext(self, arcname, texts = "", encoding = "utf-8", errors = "strict"):
         """
@@ -489,7 +541,7 @@ class ZipOutput(object):
         """
         if not arcname in self.packed:
             self.packed.add(arcname)
-            self.__z.writestr(arcname, ensure_bytes(texts, encoding, errors))
+            self.__out.writestr(arcname, ensure_bytes(texts, encoding, errors))
     
     @contextlib.contextmanager
     def open(self, arcname, mode = "wb"):
@@ -501,5 +553,112 @@ class ZipOutput(object):
             tempf.close()
             if not arcname in self.packed:
                 self.packed.add(arcname)
-                self.__z.write(tempf.name, arcname)
+                self.__out.write(tempf.name, arcname)
+            os.remove(tempf.name)
+
+class WrappedBlobWriter(object):
+    """
+    :class:`blobstore.BlobWriter` を用いた BLOBファイルへの書き込みをラップしたもの
+    """
+    def __init__(self, blobfilename = None):
+        """
+        対象のファイル名、または一時ファイルとして初期化する
+        """
+        self.__out = blobstore.BlobWriter(blobfilename or tempfile.NamedTemporaryFile("wb", delete = False).name)
+        self.__is_tempfile = blobfilename is None
+        self.__filename = FilePath.ensure(self.__out.filename)
+        self.packed = set()
+    
+    @property
+    def is_tempfile(self):
+        """
+        書き込み先のファイルが一時ファイルであるかを表す
+        """
+        return self.__is_tempfile
+    
+    @property
+    def raw_blobwriter(self):
+        """
+        (internal) このオブジェクトで使用される :class:`blobstore.BlobWriter` を得る
+        """
+        return self.__out
+    
+    @property
+    def filename(self):
+        """
+        書き込み先のファイルパスを得る
+        """
+        return self.__filename
+    
+    def close(self):
+        """
+        書き込みを完了する
+        """
+        if self.is_closed:
+            return
+        self.__out.close()
+        self.__out = None
+    
+    @property
+    def is_closed(self):
+        """
+        書き込みが完了しているかを表す
+        """
+        return self.__out is None
+    
+    @contextlib.contextmanager
+    def finishing(self):
+        """
+        書き込みを完了し、自身を返却する `ContextManager` を得る
+        """
+        assert not self.is_closed
+        self.close()
+        yield self
+        if self.is_tempfile:
+            print("(remove tempfile %s)" % self.filename)
+            os.remove(self.filename)
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, etype, einst, etrace):
+        self.close()
+    
+    def writefile(self, srcfile, arcname = None):
+        """
+        `zipfile.Zipfile.write` のように既存のファイルをこの ZIPへ追加する
+        """
+        if arcname is None:
+            os.path.basename(srcfile)
+        if not arcname in self.packed:
+            self.packed.add(arcname)
+            self.__out.writefile(srcfile, arcname)
+    
+    def writebytes(self, arcname, abytes = b""):
+        """
+        バイト列を書き込む
+        """
+        if not arcname in self.packed:
+            self.packed.add(arcname)
+            self.__out.writebytes(arcname, ensure_bytes(abytes))
+    
+    def writetext(self, arcname, texts = "", encoding = "utf-8", errors = "strict"):
+        """
+        文字列を書き込む
+        """
+        if not arcname in self.packed:
+            self.packed.add(arcname)
+            self.__out.writebytes(arcname, ensure_bytes(texts, encoding, errors))
+    
+    @contextlib.contextmanager
+    def open(self, arcname, mode = "wb"):
+        """
+        バッファを作成して書き込む
+        """
+        with tempfile.NamedTemporaryFile(mode, delete = False) as tempf:
+            yield tempf
+            tempf.close()
+            if not arcname in self.packed:
+                self.packed.add(arcname)
+                self.__out.writefile(tempf.name, arcname)
             os.remove(tempf.name)

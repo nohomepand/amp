@@ -105,6 +105,7 @@ if __name__ == '__main__':
             print(el)
         print("".center(20, "="))
     _()
+
 """
 
 PSHELL_BAT = """\
@@ -119,4 +120,15 @@ set BOOTMOD={bootstrap_py_name}
 set PYTHONSTARTUP=%BOOTMOD%
 %PYTHON%
 endlocal
+"""
+
+PSHELL_BASH = """\
+#!/bin/bash
+export EXPAND_DIR=./{distname}.exp
+export PATH=${EXPAND_DIR}:$PATH
+export PYTHONPATH=./{modules}
+export PYTHON={python_executable}
+export BOOTMOD={bootstrap_py_name}
+export PYTHONSTARTUP=${BOOTMOD}
+$PYTHON
 """
