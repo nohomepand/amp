@@ -34,10 +34,11 @@ elif 'nt' in _builtin_names:  # For Windows
 else:
     raise RuntimeError("Unknown platform")
 
+os_seps = ("/", "\\")
 def os_path_join(*args, **kw):
     # see also PyInstaller::https://github.com/pyinstaller/pyinstaller/blob/develop/PyInstaller/loader/pyimod01_os_path.py
     sep = kw.get("sep", "/")
-    seps = ("/", "\\") + (sep, )
+    seps = (os_seps + (sep, )) if not sep in os_seps else os_seps
     def _join(a, *args):
         if not a: # e.g `a == ""`
             return _join(*args)
@@ -53,6 +54,15 @@ def os_path_join(*args, **kw):
             else:
                 return a + sep + _join(b, *args)
     return _join(*args) if args else ""
+
+def os_path_dirname(path, **kw):
+    sep = kw.get("sep", "/")
+    seps = (os_seps + (sep, )) if not sep in os_seps else os_seps
+    ps = max([path.rfind(s) for s in seps])
+    if ps < 0:
+        return "" # no dirname
+    else:
+        return path[:ps]
 
 class AbstractFinder(object):
     """
@@ -144,8 +154,30 @@ class GetRelativePathMixin(object):
             assert hasattr(that, k), "Require %s attribute in %s" % (k, that)
         return that
 
-class PythonModulePath(str): pass
-class PythonPackagePath(str): pass
+class PythonPath(str):
+    def __new__(cls, filepathlike, fullname):
+        return str.__new__(cls, filepathlike)
+    
+    is_package = None
+    package_path = None
+    
+    def __init__(self, _, fullname):
+        self.fullname = fullname
+
+class PythonModulePath(PythonPath):
+    is_package = property(lambda self: False)
+    
+    def __init__(self, filepathlike, fullname):
+        PythonPath.__init__(self, _, fullname)
+        package_name = fullname.rsplit(".", 1)[0]
+        self.package_path = PythonPackagePath(
+            os_path_dirname(filepathlike) + "/__init__.py",
+            package_name
+        )
+
+class PythonPackagePath(PythonPath):
+    is_package = property(lambda self: True)
+    package_path = property(lambda self: self)
 
 class AMPStackedImporter(AbstractFinder, AbstractLoader):
     """
@@ -206,26 +238,6 @@ class selectable_loader(AbstractLoader):
             mod = self.loader_impl.load_module(fullname, entry_name = entry_name, *self.loader_args)
             if not mod:
                 return
-            """
-            ('__cached__', None)
-            ('__doc__', None)
-            ('__file__', 'Z:\\out\\out\\py\\django\\__init__.py')
-            ('__loader__', <zipimporter object "Z:\out\out\py">)
-            ('__name__', 'django')
-            ('__package__', 'django')
-            ('__path__', ['Z:\\out\\out\\py\\django'])
-            ('__spec__', ModuleSpec(name='django', loader=<zipimporter object "Z:\out\out\py">, origin='Z:\\out\\out\\py\\django\\__init__.py', submodule_search_locations=['Z:\\out\\out\\py\\django']))
-            ('__version__', '2.0')
-            ('get_version', <function get_version at 0x02DFE7C8>)
-            ('setup', <function setup at 0x02E116F0>)
-            ('utils', <module 'django.utils' from 'Z:\\out\\out\\py\\django\\utils\\__init__.py'>)
-
-                if is_pkg:
-                    module.__package__ = fullname
-                else:
-                    module.__package__ = fullname.rsplit('.', 1)[0]
-
-            """
             mod.__file__ = self.parent.synth_path(self.loader.get_relpath(mod.__file__))
             mod.__loader__ = self
             if is_pkg:
@@ -294,41 +306,33 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
             return sys.modules[fullname]
         except LookupError:
             pass
-        if is_package is None:
-            filename = self.get_filename(fullname)
-            is_package = isinstance(filename, PythonPackagePath)
-            if is_package:
-                package_path = fullname.replace(".", "/")
-        elif is_package:
-            package_path = fullname.replace(".", "/")
-            filename = PythonPackagePath(package_path + "/__init__.py")
-        else:
-            filename = PythonPackagePath(fullname.replace(".", "/") + ".py")
-        if not filename in self.br.files:
-            raise ImportError(fullname)
-        
+        pypath = self.get_filename(fullname)
         module = ModuleType(fullname)
-        module.__file__ = self.br.filename + "/" + filename
-        if is_package:
-            module.__path__ = [package_path]
+        module.__file__ = os_path_join(self.br.filename, pypath)
+        if pypath.is_package:
+            module.__path__ = [pypath.package_path]
             module.__package__ = fullname
         else:
-            module.__package__ = fullname.rsplit(".", 1)[0]
+            module.__package__ = pypath.package_path.fullname
         module.__loader__ = self
         sys.modules[fullname] = module
-        contents = self.br.read(filename)
-        exec(contents, module.__dict__) # need compiled? / freezed module?
-        module = sys.modules[fullname]
-        return module
+        contents = self.br.read(pypath)
+        try:
+            exec(contents, module.__dict__) # need compiled? / freezed module?
+            module = sys.modules[fullname]
+            return module
+        except:
+            sys.modules.pop(fullname, None)
+            raise
     
     #region optional PEP-302
     def get_filename(self, fullname):
         s = fullname.replace(".", "/")
         if (s + ".py") in self.br.files:
             is_package = False
-            return PythonModulePath(s + ".py")
+            return PythonModulePath(s + ".py", fullname)
         elif (s + "/__init__.py") in self.br.files:
-            return PythonPackagePath(s + "/__init__.py")
+            return PythonPackagePath(s + "/__init__.py", fullname)
         else:
             raise ImportError(fullname)
     
