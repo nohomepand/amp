@@ -7,19 +7,10 @@ from __future__ import absolute_import, print_function, unicode_literals
 
 import sys
 from . import blobstore
-
-# import os
-
-# def joinpath(*subpath, **kwargs):
-#     return os.path.abspath(os.path.join(kwargs.get("basedir", joinpath.basedir), *subpath))
-# joinpath.basedir = os.path.dirname(__file__)
-
-# isdir = os.path.isdir
-# isfile = os.path.isfile
-# def checkfile(path, v = isfile):
-#     assert v(path), "Not found {{path}}".format(**locals())
-#     return path
-
+try:
+    import _frozen_importlib as frozen_importlib # noqa
+except ImportError:
+    frozen_importlib = None
 ModuleType = type(sys)
 
 _builtin_names = sys.builtin_module_names
@@ -151,6 +142,9 @@ class GetRelativePathMixin(object):
     @classmethod
     def is_relativepath_like(cls, that):
         for k in cls.__dict__:
+            v = cls.__dict__[k]
+            if isinstance(v, classmethod):
+                continue
             assert hasattr(that, k), "Require %s attribute in %s" % (k, that)
         return that
 
@@ -179,7 +173,7 @@ class PythonPackagePath(PythonPath):
     is_package = property(lambda self: True)
     package_path = property(lambda self: self)
 
-class AMPStackedImporter(AbstractFinder, AbstractLoader):
+class AMPStackedFinder(AbstractFinder):
     """
     unionfsのように積層的に登録されたローダを通じてロードする代表のローダ;
     ロードされたモジュールの検索パスはただ一つのルートを持つように変更される
@@ -190,16 +184,20 @@ class AMPStackedImporter(AbstractFinder, AbstractLoader):
         self.__importers = []
     
     def register(self, importer):
-        if importer in self.importers:
+        if importer in self.__importers:
             self.__importers.remove(importer)
         assert GetRelativePathMixin.is_relativepath_like(importer)
         self.__importers.append(importer)
         return importer
     
     def unregister(self, importer):
-        if importer in self.importers:
+        if importer in self.__importers:
             self.__importers.remove(importer)
             return importer
+    
+    @property
+    def importers(self):
+        return tuple(self.__importers)
     
     def find_module(self, fullname, path=None):
         for importer in self.__importers:
@@ -221,7 +219,7 @@ class AMPStackedImporter(AbstractFinder, AbstractLoader):
 
 class selectable_loader(AbstractLoader):
     def __init__(self, parent, loader_impl, *loader_args):
-        assert isinstance(parent, AMPStackedImporter)
+        assert isinstance(parent, AMPStackedFinder)
         assert GetRelativePathMixin.is_relativepath_like(loader_impl)
         self.parent = parent
         self.loader = loader_impl
@@ -235,7 +233,7 @@ class selectable_loader(AbstractLoader):
         try:
             sys.modules[fullname]
         except LookupError:
-            mod = self.loader_impl.load_module(fullname, entry_name = entry_name, *self.loader_args)
+            mod = self.loader.load_module(fullname, entry_name = entry_name, *self.loader_args)
             if not mod:
                 return
             mod.__file__ = self.parent.synth_path(self.loader.get_relpath(mod.__file__))
@@ -245,25 +243,21 @@ class selectable_loader(AbstractLoader):
                 mod.__path__ = list(map(lambda path: self.parent.synth_path(self.loader.get_relpath(path)), mod.__path__))
             else:
                 mod.__package__ = fullname.rsplit('.', 1)[0]
-            if hasattr(mod, "__spec__"):
-                # PEP-451 ModuleSpec
-                # see also importlib.machinery.ModuleSpec
-                # TODO: wip
-                mod.__spec__.loader = self
+            if frozen_importlib:
+                module.__spec__ = frozen_importlib.ModuleSpec(
+                    fullname,
+                    self,
+                    is_package = is_pkg,
+                )
+            sys.modules[fullname] = module # override
             return mod
     
     #region optional PEP-302
-    def get_filename(self, fullname):
-        # placeholder
-        pass
+    def get_filename(self, fullname): pass # placeholder
     
-    def is_package(self, fullname):
-        # placeholder
-        pass
+    def is_package(self, fullname): pass # placeholder
     
-    def get_code(self, fullname):
-        # placeholder
-        pass
+    def get_code(self, fullname): pass # placeholder
     
     def get_source(self, fullname):
         """
@@ -329,18 +323,16 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
     def get_filename(self, fullname):
         s = fullname.replace(".", "/")
         if (s + ".py") in self.br.files:
-            is_package = False
-            return PythonModulePath(s + ".py", fullname)
+            return PythonModulePath(os_path_join(self.br.filename, s + ".py"), fullname)
         elif (s + "/__init__.py") in self.br.files:
-            return PythonPackagePath(s + "/__init__.py", fullname)
+            return PythonPackagePath(os_path_join(self.br.filename, s + "/__init__.py"), fullname)
         else:
             raise ImportError(fullname)
     
     def is_package(self, fullname):
-        return isinstance(self.get_filename(fullname), PythonPackagePath)
+        return self.get_filename(fullname).is_package
     
     def get_code(self, fullname):
-        # placeholder
         filename = self.get_filename(fullname)
         return compile(self.br.read(filename), filename, "exec")
     
