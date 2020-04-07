@@ -1,7 +1,14 @@
 #!/usr/bin/env python
 # encoding: utf-8
 """
+Created on 2020/04
 
+@author: nonamepand
+
+* Python Module Finder/Loader implementation for AMP; see also PEP-302, and PEP-451
+ - related Python's documentation
+  - (py3k): https://docs.python.org/3/library/importlib.html
+* NOTE; this module and enclosing packages should be installed as `plain` files
 """
 from __future__ import absolute_import, print_function, unicode_literals
 
@@ -13,21 +20,47 @@ except ImportError:
     frozen_importlib = None
 ModuleType = type(sys)
 
+#region os.path operations
 _builtin_names = sys.builtin_module_names
-if 'posix' in _builtin_names:  # For Linux, Unix, Mac OS X
+
+if 'posix' in _builtin_names:
+    # For Linux, Unix, Mac OS X
     def is_abspath(s):
+        # returns whether the target `s` points to absolute file path
         if not s: return False
         return s[0] in ("/", "\\")
-elif 'nt' in _builtin_names:  # For Windows
+    os_seps = ("/", ) #: path separators
+elif 'nt' in _builtin_names:
+    # For Windows
     def is_abspath(s):
+        # returns whether the target `s` points to absolute file path
         if not s: return False
         return len(s) >= 2 and ("a" <= s[0] <= "z" or "A" <= s[0] <= "Z") and s[1] == ":"
+    os_seps = ("/", "\\") #: path separators
 else:
     raise RuntimeError("Unknown platform")
 
-os_seps = ("/", "\\")
+def norm_path(path, chars = ("\\", ), sep = "/"):
+    """
+    normalizes Path string from `chars` into `sep` string
+    """
+    for ch in chars:
+        path = path.replace(ch, sep)
+    return path
+
 def os_path_join(*args, **kw):
-    # see also PyInstaller::https://github.com/pyinstaller/pyinstaller/blob/develop/PyInstaller/loader/pyimod01_os_path.py
+    """
+    :func:`os.path.join` shim;
+    this function can be concatenate relative paths (and also absolute one) into a single path string.
+    
+    see also PyInstaller::https://github.com/pyinstaller/pyinstaller/blob/develop/PyInstaller/loader/pyimod01_os_path.py
+    
+    .. code-block::
+    
+        os_path_join("foo", "bar", "baz") # foo/bar/baz
+        os_path_join("foo", "bar/baz") # foo/bar/baz
+        os_path_join("foo", "/bar", "baz") # /bar/baz (NOTE; this behaviour is only in `posix` env.)
+    """
     sep = kw.get("sep", "/")
     seps = (os_seps + (sep, )) if not sep in os_seps else os_seps
     def _join(a, *args):
@@ -47,6 +80,9 @@ def os_path_join(*args, **kw):
     return _join(*args) if args else ""
 
 def os_path_dirname(path, **kw):
+    """
+    :func:`os.path.dirname` shim;
+    """
     sep = kw.get("sep", "/")
     seps = (os_seps + (sep, )) if not sep in os_seps else os_seps
     ps = max([path.rfind(s) for s in seps])
@@ -54,10 +90,12 @@ def os_path_dirname(path, **kw):
         return "" # no dirname
     else:
         return path[:ps]
+#endregion os.path operations
 
+#region abstract module finder/loaders
 class AbstractFinder(object):
     """
-    PEP-302(partial PEP-451) module finder implementation for AMP
+    PEP-302 (partial PEP-451) module finder interfaces
     """
     def find_module(self, fullname, path=None):
         # Deprecated in Python 3.4, see PEP-451
@@ -74,15 +112,7 @@ class AbstractFinder(object):
 
 class AbstractLoader(object):
     """
-    PEP-302(partial PEP-451) module loader implementation for AMP
-    
-    class Loader(metaclass=ABCMeta):
-        def load_module(self, fullname: str) -> ModuleType: ...
-        def module_repr(self, module: ModuleType) -> str: ...
-        def create_module(self, spec: ModuleSpec) -> Optional[ModuleType]: ...
-        # Not defined on the actual class for backwards-compatibility reasons,
-        # but expected in new code.
-        def exec_module(self, module: ModuleType) -> None: ...
+    PEP-302 (partial PEP-451) module loader interfaces
     """
     
     def load_module(self, fullname, entry_name=None, *args):
@@ -104,15 +134,23 @@ class AbstractLoader(object):
         if the named module was loaded. If the module is not found, then
         ImportError should be raised.
         """
+        raise ImportError(fullname)
     
     def is_package(self, fullname):
-        return False
+        """
+        An abstract method to return a true value if the module is a package,
+        a false value otherwise. ImportError is raised if the loader cannot
+        find the module.
+        Changed in version 3.4: Raises ImportError instead of NotImplementedError.
+        """
+        raise ImportError(fullname)
     
     def get_code(self, fullname):
         """
         Get the code object associated with the module.
         ImportError should be raised if module not found.
         """
+        raise ImportError(fullname)
     
     def get_source(self, fullname):
         """
@@ -120,6 +158,7 @@ class AbstractLoader(object):
         But frozen modules does not contain source code.
         Return None.
         """
+        return None
     
     def get_data(self, path):
         """
@@ -130,17 +169,46 @@ class AbstractLoader(object):
         The 'path' argument is a path that can be constructed by munging
         module.__file__ (or pkg.__path__ items)
         """
+        """
+        An abstract method to return the bytes for the data located at path.
+        Loaders that have a file-like storage back-end that allows storing
+        arbitrary data can implement this abstract method to give direct access
+        to the data stored. OSError is to be raised if the path cannot be found.
+        The path is expected to be constructed using a module’s __file__
+        attribute or an item from a package’s __path__.
+        
+        Changed in version 3.4: Raises OSError instead of NotImplementedError.
+        """
+        raise IOError(path)
     #endregion optional PEP-302
+#endregion abstract module finder/loaders
 
+#region AMP importer implementations
+#region importer python path utils
 class GetRelativePathMixin(object):
+    """
+    (interface)
+    object which has `basepath` and `relative path concatenation`;
+    this mixin denotes an ability to compose and split paths which is originated to this object.
+    """
+    
     def get_basepath(self):
+        """
+        returns base path string
+        """
         raise NotImplementedError()
     
     def get_relpath(self, path):
+        """
+        make `relative path` from target (absolute) paths based on :func:`self.get_basepath`.
+        """
         raise NotImplementedError()
     
     @classmethod
     def is_relativepath_like(cls, that):
+        """
+        checks whether `that` object has :class:`GetRelativePathMixin` interfaces
+        """
         for k in cls.__dict__:
             v = cls.__dict__[k]
             if isinstance(v, classmethod):
@@ -149,7 +217,21 @@ class GetRelativePathMixin(object):
         return that
 
 class PythonPath(str):
+    """
+    string derived object which denotes a path of Python Module on corresponding loader object;
+    this object also has `is_package` and `package_path` attributes.
+    
+    :data:`~is_package` is True if this object point to Python package.
+    :data:`~package_path` is a PythonPath derived instance which is a path to package of this instance.
+    """
     def __new__(cls, filepathlike, fullname):
+        """
+        (for instantiation hook)
+        create new instance
+        
+        :param filepathlike: Python module/package path
+        :param fullname: Python module/packages' fullname
+        """
         return str.__new__(cls, filepathlike)
     
     is_package = None
@@ -159,83 +241,116 @@ class PythonPath(str):
         self.fullname = fullname
 
 class PythonModulePath(PythonPath):
+    """
+    Python module path string.
+    """
     is_package = property(lambda self: False)
     
     def __init__(self, filepathlike, fullname):
         PythonPath.__init__(self, _, fullname)
         package_name = fullname.rsplit(".", 1)[0]
         self.package_path = PythonPackagePath(
-            os_path_dirname(filepathlike) + "/__init__.py",
+            os_path_join(os_path_dirname(filepathlike), "__init__.py"),
             package_name
         )
 
 class PythonPackagePath(PythonPath):
+    """
+    Python package path string.
+    """
     is_package = property(lambda self: True)
     package_path = property(lambda self: self)
+#endregion importer python path utils
 
 class AMPStackedFinder(AbstractFinder):
     """
-    unionfsのように積層的に登録されたローダを通じてロードする代表のローダ;
-    ロードされたモジュールの検索パスはただ一つのルートを持つように変更される
+    unionfsのように積層的に登録されたローダを通じてロードする代表のファインダ;
+    モジュールの検索パスはただ一つのルートを持つように変更される
     """
     
     def __init__(self, delegation_path):
+        """
+        初期化
+        
+        :param delegation_path: このファインダからロードされたモジュールの基底のパス
+        """
         self.delegation_path = delegation_path
         self.__importers = []
     
     def register(self, importer):
-        if importer in self.__importers:
-            self.__importers.remove(importer)
+        """
+        モジュールローダを登録する;
+        登録されたモジュールローダは常に「最後に検索される」ように扱われる
+        """
         assert GetRelativePathMixin.is_relativepath_like(importer)
+        self.unregister(importer)
         self.__importers.append(importer)
         return importer
     
     def unregister(self, importer):
+        """
+        モジュールローダの登録を解除する
+        """
         if importer in self.__importers:
             self.__importers.remove(importer)
             return importer
     
     @property
     def importers(self):
+        """
+        (immutable)
+        登録されたモジュールローダの、検索順序に基づく整列されたタプルを得る
+        """
         return tuple(self.__importers)
     
     def find_module(self, fullname, path=None):
+        # override
         for importer in self.__importers:
             found = importer.find_module(fullname, path = path)
             if found:
-                if isinstance(found, tuple):
-                    found, args = found[0], found[1:]
-                else:
-                    args = ()
-                return selectable_loader(self, found, *args)
+                return selectable_loader(self, found) # TODO: cache?
     
     def synth_path(self, loader_relpath):
-        print("synth_path", loader_relpath)
+        """
+        対象の相対パスを、このファインダの基底のパス以下のパスとして結合した値を得る;
+        結合されたパスは実体が存在しない可能性があるが、モジュールの検索以外のパス操作(依存ファイルのパスの解決)などで、
+        すべてのモジュールローダが連合したかのような操作を行うために必要。
+        (ZIPに格納されたモジュールからの相対パスで依存ファイルを解決する場合など)
+        """
         return os_path_join(self.delegation_path, loader_relpath)
     
     def related_path(self, synth_path):
+        """
+        対象の絶対パスを、このファインダの基底のパスからの相対パスとして分解した値を得る
+        """
         assert synth_path.startswith(self.delegation_path)
         return synth_path[len(self.delegation_path):]
 
 class selectable_loader(AbstractLoader):
-    def __init__(self, parent, loader_impl, *loader_args):
+    """
+    (internal)
+    :class:`AMPStackedFinder` の `find_module` で返却されるモジュールローダのプロキシとなるもの
+    """
+    def __init__(self, parent, loader_impl):
         assert isinstance(parent, AMPStackedFinder)
         assert GetRelativePathMixin.is_relativepath_like(loader_impl)
         self.parent = parent
         self.loader = loader_impl
-        self.loader_args = loader_args
         self.get_filename = self.loader.get_filename
         self.is_package = getattr(self.loader, "is_package", lambda fullname: None)
         self.get_code = self.loader.get_code
         self.get_source = self.loader.get_source
     
     def load_module(self, fullname, entry_name=None):
+        # override
+        """
+        対象の Python完全名を :func:`self.loader.load_module` でロードした後に、
+        ファイルパスを :data:`self.parent` の相対パスとして再構成したモジュールを返却する
+        """
         try:
-            sys.modules[fullname]
+            return sys.modules[fullname]
         except LookupError:
-            mod = self.loader.load_module(fullname, entry_name = entry_name, *self.loader_args)
-            if not mod:
-                return
+            mod = self.loader.load_module(fullname, entry_name = entry_name) # may be raise ImportError
             mod.__file__ = self.parent.synth_path(self.loader.get_relpath(mod.__file__))
             mod.__loader__ = self
             if is_pkg:
@@ -252,40 +367,26 @@ class selectable_loader(AbstractLoader):
             sys.modules[fullname] = module # override
             return mod
     
-    #region optional PEP-302
     def get_filename(self, fullname): pass # placeholder
-    
     def is_package(self, fullname): pass # placeholder
-    
     def get_code(self, fullname): pass # placeholder
-    
-    def get_source(self, fullname):
-        """
-        Method should return the source code for the module as a string.
-        But frozen modules does not contain source code.
-        Return None.
-        """
+    def get_source(self, fullname): pass # placeholder
     
     def get_data(self, path):
-        """
-        This returns the data as a string, or raise IOError if the "file"
-        wasn't found. The data is always returned as if "binary" mode was used.
-        This method is useful getting resources with 'pkg_resources' that are
-        bundled with Python modules in the PYZ archive.
-        The 'path' argument is a path that can be constructed by munging
-        module.__file__ (or pkg.__path__ items)
-        """
         path = os_path_join(self.loader.get_basepath(), self.parent.related_path(path))
         return self.loader.get_data(path)
 
 class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
+    """
+    :class:`blobstore.BlobReader` で読み取れるコンテナファイルからモジュールを検索/ロードするインポータ
+    """
     def __init__(self, filename):
         self.br = blobstore.BlobReader(filename)
     
     def find_module(self, fullname, path=None):
         try:
-            s = self.get_filename(fullname)
-            return self, isinstance(s, PythonPackagePath) # is_package = True
+            self.get_filename(fullname) # test
+            return self
         except ImportError:
             pass
     
@@ -293,13 +394,16 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
         return self.br.filename
     
     def get_relpath(self, path):
-        pass
+        if not path.startswith(self.br.filename): # FIXME: case-insensitive?
+            return path
+        return path[len(self.br.filename):]
     
-    def load_module(self, fullname, entry_name=None, is_package = None):
+    def load_module(self, fullname, entry_name=None):
         try:
             return sys.modules[fullname]
         except LookupError:
             pass
+        # 標準のローダプロトコルに従って fullname モジュールを生成する
         pypath = self.get_filename(fullname)
         module = ModuleType(fullname)
         module.__file__ = os_path_join(self.br.filename, pypath)
@@ -319,7 +423,6 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
             sys.modules.pop(fullname, None)
             raise
     
-    #region optional PEP-302
     def get_filename(self, fullname):
         s = fullname.replace(".", "/")
         if (s + ".py") in self.br.files:
@@ -341,12 +444,5 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
         return self.br.read(filename)
     
     def get_data(self, path):
-        """
-        This returns the data as a string, or raise IOError if the "file"
-        wasn't found. The data is always returned as if "binary" mode was used.
-        This method is useful getting resources with 'pkg_resources' that are
-        bundled with Python modules in the PYZ archive.
-        The 'path' argument is a path that can be constructed by munging
-        module.__file__ (or pkg.__path__ items)
-        """
         return self.br.read(path)
+#endregion AMP importer implementations
