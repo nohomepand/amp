@@ -20,7 +20,7 @@ except ImportError:
     frozen_importlib = None
 ModuleType = type(sys)
 
-#region os.path operations
+#region os.path operations, and utilities
 _builtin_names = sys.builtin_module_names
 
 if 'posix' in _builtin_names:
@@ -90,7 +90,24 @@ def os_path_dirname(path, **kw):
         return "" # no dirname
     else:
         return path[:ps]
-#endregion os.path operations
+
+class MixinFunc(object):
+    # TODO: document
+    @classmethod
+    def is_like(cls, that):
+        """
+        checks whether `that` object has interfaces of this class
+        """
+        for c in cls.mro():
+            for k in c.__dict__:
+                if k[0] == "_":
+                    continue
+                v = c.__dict__[k]
+                if isinstance(v, classmethod):
+                    continue
+                assert hasattr(that, k), "Require %s attribute in %s but %r" % (k, that, v)
+        return that
+#endregion os.path operations, and utilities
 
 #region abstract module finder/loaders
 class AbstractFinder(object):
@@ -181,11 +198,20 @@ class AbstractLoader(object):
         """
         raise IOError(path)
     #endregion optional PEP-302
+
+class AbstractRelativeLoader(MixinFunc):
+    # TODO: document
+    def set_delegate_path(self, path):
+        raise NotImplementedError()
+    
+    def clear_delegate_path(self):
+        raise NotImplementedError()
+    
 #endregion abstract module finder/loaders
 
 #region AMP importer implementations
 #region importer python path utils
-class GetRelativePathMixin(object):
+class GetRelativePathMixin(MixinFunc):
     """
     (interface)
     object which has `basepath` and `relative path concatenation`;
@@ -203,18 +229,6 @@ class GetRelativePathMixin(object):
         make `relative path` from target (absolute) paths based on :func:`self.get_basepath`.
         """
         raise NotImplementedError()
-    
-    @classmethod
-    def is_relativepath_like(cls, that):
-        """
-        checks whether `that` object has :class:`GetRelativePathMixin` interfaces
-        """
-        for k in cls.__dict__:
-            v = cls.__dict__[k]
-            if isinstance(v, classmethod):
-                continue
-            assert hasattr(that, k), "Require %s attribute in %s" % (k, that)
-        return that
 
 class PythonPath(str):
     """
@@ -282,9 +296,11 @@ class AMPStackedFinder(AbstractFinder):
         モジュールローダを登録する;
         登録されたモジュールローダは常に「最後に検索される」ように扱われる
         """
-        assert GetRelativePathMixin.is_relativepath_like(importer)
+        assert GetRelativePathMixin.is_like(importer)
+        assert AbstractRelativeLoader.is_like(importer)
         self.unregister(importer)
         self.__importers.append(importer)
+        importer.set_delegate_path(self.delegation_path)
         return importer
     
     def unregister(self, importer):
@@ -293,6 +309,7 @@ class AMPStackedFinder(AbstractFinder):
         """
         if importer in self.__importers:
             self.__importers.remove(importer)
+            importer.clear_delegate_path()
             return importer
     
     @property
@@ -333,13 +350,9 @@ class selectable_loader(AbstractLoader):
     """
     def __init__(self, parent, loader_impl):
         assert isinstance(parent, AMPStackedFinder)
-        assert GetRelativePathMixin.is_relativepath_like(loader_impl)
+        assert GetRelativePathMixin.is_like(loader_impl)
         self.parent = parent
         self.loader = loader_impl
-        self.get_filename = self.loader.get_filename
-        self.is_package = getattr(self.loader, "is_package", lambda fullname: None)
-        self.get_code = self.loader.get_code
-        self.get_source = self.loader.get_source
     
     def load_module(self, fullname, entry_name=None):
         # override
@@ -353,24 +366,33 @@ class selectable_loader(AbstractLoader):
             mod = self.loader.load_module(fullname, entry_name = entry_name) # may be raise ImportError
             mod.__file__ = self.parent.synth_path(self.loader.get_relpath(mod.__file__))
             mod.__loader__ = self
-            if is_pkg:
-                mod.__package__ = fullname
+            if mod.__package__ == fullname:
                 mod.__path__ = list(map(lambda path: self.parent.synth_path(self.loader.get_relpath(path)), mod.__path__))
-            else:
-                mod.__package__ = fullname.rsplit('.', 1)[0]
-            if frozen_importlib:
-                module.__spec__ = frozen_importlib.ModuleSpec(
-                    fullname,
-                    self,
-                    is_package = is_pkg,
-                )
+            if getattr(mod, "__spec__", None):
+                """
+                self.name = name
+                self.loader = loader
+                self.origin = origin
+                self.loader_state = loader_state
+                self.submodule_search_locations = [] if is_package else None
+                """
+                mod.__spec__.loader = self
+            
             sys.modules[fullname] = module # override
             return mod
     
-    def get_filename(self, fullname): pass # placeholder
-    def is_package(self, fullname): pass # placeholder
-    def get_code(self, fullname): pass # placeholder
-    def get_source(self, fullname): pass # placeholder
+    def get_filename(self, fullname):
+        s = self.loader.get_filename(fullname)
+        return s.__class__(self.parent.synth_path(s), fullname)
+    
+    def is_package(self, fullname):
+        return self.loader.get_filename(fullname).is_package
+    
+    def get_code(self, fullname):
+        return self.loader.get_code(fullname)
+    
+    def get_source(self, fullname):
+        return self.loader.get_source(fullname)
     
     def get_data(self, path):
         path = os_path_join(self.loader.get_basepath(), self.parent.related_path(path))
@@ -382,6 +404,13 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
     """
     def __init__(self, filename):
         self.br = blobstore.BlobReader(filename)
+        self.__delegate_path = ""
+    
+    def set_delegate_path(self, path):
+        self.__delegate_path = path
+    
+    def clear_delegate_path(self):
+        self.__delegate_path = ""
     
     def find_module(self, fullname, path=None):
         try:
@@ -413,6 +442,12 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
         else:
             module.__package__ = pypath.package_path.fullname
         module.__loader__ = self
+        if frozen_importlib:
+            module.__spec__ = frozen_importlib.ModuleSpec(
+                fullname,
+                self,
+                is_package = pypath.is_package,
+            )
         sys.modules[fullname] = module
         contents = self.br.read(pypath)
         try:
@@ -423,25 +458,28 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
             sys.modules.pop(fullname, None)
             raise
     
-    def get_filename(self, fullname):
+    def get_rel_filename(self, fullname):
         s = fullname.replace(".", "/")
         if (s + ".py") in self.br.files:
-            return PythonModulePath(os_path_join(self.br.filename, s + ".py"), fullname)
+            return PythonModulePath(s + ".py", fullname)
         elif (s + "/__init__.py") in self.br.files:
-            return PythonPackagePath(os_path_join(self.br.filename, s + "/__init__.py"), fullname)
+            return PythonPackagePath(s + "/__init__.py", fullname)
         else:
             raise ImportError(fullname)
     
+    def get_filename(self, fullname):
+        s = self.get_rel_filename(fullname)
+        return s.__class__(os_path_join(self.__delegate_path, s), fullname)
+    
     def is_package(self, fullname):
-        return self.get_filename(fullname).is_package
+        return self.get_rel_filename(fullname).is_package
     
     def get_code(self, fullname):
-        filename = self.get_filename(fullname)
-        return compile(self.br.read(filename), filename, "exec")
+        s = self.get_rel_filename(fullname)
+        return compile(self.br.read(s), s.__class__(os_path_join(self.__delegate_path, s), fullname), "exec")
     
     def get_source(self, fullname):
-        filename = self.get_filename(fullname)
-        return self.br.read(filename)
+        return self.br.read(self.get_rel_filename(fullname))
     
     def get_data(self, path):
         return self.br.read(path)
