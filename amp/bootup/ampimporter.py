@@ -10,7 +10,7 @@ Created on 2020/04
   - (py3k): https://docs.python.org/3/library/importlib.html
 * NOTE; this module and enclosing packages should be installed as `plain` files
 """
-from __future__ import absolute_import, print_function, unicode_literals
+from __future__ import absolute_import, print_function
 
 import sys
 from . import blobstore
@@ -92,12 +92,31 @@ def os_path_dirname(path, **kw):
         return path[:ps]
 
 class MixinFunc(object):
-    # TODO: document
+    """
+    Mixin-able object interface
+    
+    .. code-block::
+    
+        class Mix1(MixinFunc):
+            def method1(self):
+                raise NotImplementedError()
+        
+        class Obj2(Mix1):
+            def method1(self):
+                return "foo"
+        
+        class Obj2(Mix1):
+            pass
+        
+        Mix1.check_is_like(Obj1()) # pass
+        Mix1.check_is_like(Obj2()) # error
+    """
     @classmethod
-    def is_like(cls, that):
+    def is_not_like(cls, that):
         """
-        checks whether `that` object has interfaces of this class
+        return False-like values when `that` object has all of members in this class
         """
+        missing_attrs = []
         for c in cls.mro():
             for k in c.__dict__:
                 if k[0] == "_":
@@ -105,8 +124,18 @@ class MixinFunc(object):
                 v = c.__dict__[k]
                 if isinstance(v, classmethod):
                     continue
-                assert hasattr(that, k), "Require %s attribute in %s but %r" % (k, that, v)
-        return that
+                if not hasattr(that, k):
+                    missing_attrs.append(k)
+        return missing_attrs
+    
+    @classmethod
+    def check_is_like(cls, that):
+        """
+        (assertion test)
+        """
+        missings = cls.is_not_like(that)
+        assert not missings, "Missing some attributes in %s: require %s" % (that, missings)
+    
 #endregion os.path operations, and utilities
 
 #region abstract module finder/loaders
@@ -200,11 +229,20 @@ class AbstractLoader(object):
     #endregion optional PEP-302
 
 class AbstractRelativeLoader(MixinFunc):
-    # TODO: document
+    """
+    (interface)
+    object which can set/clear `delegation file path`
+    """
     def set_delegate_path(self, path):
+        """
+        set current delegation file path
+        """
         raise NotImplementedError()
     
     def clear_delegate_path(self):
+        """
+        clear current delegation file path
+        """
         raise NotImplementedError()
     
 #endregion abstract module finder/loaders
@@ -296,8 +334,8 @@ class AMPStackedFinder(AbstractFinder):
         モジュールローダを登録する;
         登録されたモジュールローダは常に「最後に検索される」ように扱われる
         """
-        assert GetRelativePathMixin.is_like(importer)
-        assert AbstractRelativeLoader.is_like(importer)
+        GetRelativePathMixin.check_is_like(importer)
+        AbstractRelativeLoader.check_is_like(importer)
         self.unregister(importer)
         self.__importers.append(importer)
         importer.set_delegate_path(self.delegation_path)
@@ -350,7 +388,7 @@ class selectable_loader(AbstractLoader):
     """
     def __init__(self, parent, loader_impl):
         assert isinstance(parent, AMPStackedFinder)
-        assert GetRelativePathMixin.is_like(loader_impl)
+        GetRelativePathMixin.check_is_like(loader_impl)
         self.parent = parent
         self.loader = loader_impl
     
@@ -366,7 +404,7 @@ class selectable_loader(AbstractLoader):
             mod = self.loader.load_module(fullname, entry_name = entry_name) # may be raise ImportError
             mod.__file__ = self.parent.synth_path(self.loader.get_relpath(mod.__file__))
             mod.__loader__ = self
-            if mod.__package__ == fullname:
+            if hasattr(mod, "__path__"):
                 mod.__path__ = list(map(lambda path: self.parent.synth_path(self.loader.get_relpath(path)), mod.__path__))
             if getattr(mod, "__spec__", None):
                 """
@@ -378,7 +416,7 @@ class selectable_loader(AbstractLoader):
                 """
                 mod.__spec__.loader = self
             
-            sys.modules[fullname] = module # override
+            sys.modules[fullname] = mod # override
             return mod
     
     def get_filename(self, fullname):
@@ -433,7 +471,7 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
         except LookupError:
             pass
         # 標準のローダプロトコルに従って fullname モジュールを生成する
-        pypath = self.get_filename(fullname)
+        pypath = self.get_rel_filename(fullname)
         module = ModuleType(fullname)
         module.__file__ = os_path_join(self.br.filename, pypath)
         if pypath.is_package:
@@ -451,7 +489,7 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
         sys.modules[fullname] = module
         contents = self.br.read(pypath)
         try:
-            exec(contents, module.__dict__) # need compiled? / freezed module?
+            exec(self.get_code(fullname), module.__dict__)
             module = sys.modules[fullname]
             return module
         except:
@@ -476,7 +514,7 @@ class AMPBlobStoreImporter(AbstractFinder, AbstractLoader):
     
     def get_code(self, fullname):
         s = self.get_rel_filename(fullname)
-        return compile(self.br.read(s), s.__class__(os_path_join(self.__delegate_path, s), fullname), "exec")
+        return compile(self.br.read(s), s.__class__(os_path_join(self.__delegate_path, s), fullname), "exec", dont_inherit=True)
     
     def get_source(self, fullname):
         return self.br.read(self.get_rel_filename(fullname))
