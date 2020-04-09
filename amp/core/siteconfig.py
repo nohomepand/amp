@@ -14,7 +14,7 @@ import sys
 import zipfile
 
 from amp.core import utils, template_bootstrap
-from amp.bootup import blobstore
+import amp.bootup as bootup
 
 class SiteConfiguration(utils.AutoDict):
     """
@@ -171,7 +171,8 @@ class PythonPackingConfiguration(PackingConfigration):
             ".*\\.chm$", # conda `compiled html` doc
             ".*\\.egg-info.*$",
         ]
-        zipsafe = [".*\\.py$"]
+        containersafe = [".*\\.py$"]
+        unpacked = False
     
     PYTHON_MODULE_EXT = (
         "py",
@@ -197,7 +198,7 @@ class PythonPackingConfiguration(PackingConfigration):
     #endregion 相対ファイルパスから完全名を生成する
     
     def dump_to(self, dumpobj):
-        zipsafe = utils.PathMatcher(*self.zipsafe)
+        containersafe = utils.PathMatcher(*self.containersafe)
         for ent in self.iter_files():
             assert isinstance(ent, utils.FilePath)
             relfilename = ent.relpath(self.root)
@@ -207,7 +208,7 @@ class PythonPackingConfiguration(PackingConfigration):
                 ent,
                 relfilename,
                 fullname = fullname,
-                zipsafe = zipsafe(ent),
+                containersafe = False if self.unpacked else containersafe(ent),
             )
 
 @PackagesConfiguration.register("python-base")
@@ -289,10 +290,10 @@ class AbstractResourceComposer(utils.Object):
             composer = self.cls.__name__,
         )
     
-    def add_distinfo(self, stored_filename, python_mod_fullname = None, zipsafe = False):
-        self.dist.files[stored_filename] = (python_mod_fullname, bool(zipsafe))
+    def add_distinfo(self, stored_filename, python_mod_fullname = None, containersafe = False):
+        self.dist.files[stored_filename] = (python_mod_fullname, bool(containersafe))
     
-    def write_python(self, filename, modpath, fullname = None, zipsafe = True):
+    def write_python(self, filename, modpath, fullname = None, containersafe = True):
         raise NotImplementedError("abstract")
     
     def write_depends(self, filename, arcname):
@@ -321,21 +322,21 @@ class ZipResourceComposer(AbstractResourceComposer):
         self.zout = utils.ZipOutput(self.outputfilename, zipfile.ZIP_DEFLATED)
         self.__closed = False
     
-    def write_python(self, filename, modpath, fullname = None, zipsafe = True):
+    def write_python(self, filename, modpath, fullname = None, containersafe = True):
         """
         このストレージへ Pythonモジュールを格納する
         
         `fullname` は、 `filename` およびそれが表す `modpath` がPythonモジュールである場合にのみ、
         そのモジュールの完全名(dotted)を与えなければならない
         """
-        zipsafe = bool(zipsafe)
-        self.add_distinfo(modpath, fullname, zipsafe)
-        if zipsafe:
-            print("DumpObject.write_python %s -> %s(%s, %s)" % (filename, modpath, fullname, zipsafe))
+        containersafe = bool(containersafe)
+        self.add_distinfo(modpath, fullname, containersafe)
+        if containersafe:
+            print("DumpObject.write_python %s -> %s(%s, %s)" % (filename, modpath, fullname, containersafe))
             self.modules.writefile(filename, modpath)
         else:
             modpath = self.dist.expand_dir + "/" + modpath
-            print("DumpObject.write_python %s -> %s(%s, %s)" % (filename, modpath, fullname, zipsafe))
+            print("DumpObject.write_python %s -> %s(%s, %s)" % (filename, modpath, fullname, containersafe))
             self.zout.writefile(filename, modpath)
     
     def write_depends(self, filename, arcname):
@@ -360,6 +361,11 @@ class ZipResourceComposer(AbstractResourceComposer):
             with self.zout.open(self.siteconf.outputs.distname, "w") as fp:
                 fp.write(utils.short_json_encoder.encode(self.dist))
             
+            bootup_basedir = utils.FilePath(bootup.__file__).dirname(2)
+            for bootup_file in utils.FilePath(bootup.__file__).dirname().list(True):
+                if bootup_file.isdir() or bootup_file.endswith(".pyc"):
+                    continue
+                self.zout.writefile(bootup_file, bootup_file.relpath(bootup_basedir))
             with self.zout.open("bootstrap.py", "wb") as fp:
                 src = template_bootstrap.BOOTSTRAP_PY.format(**self.siteconf.outputs)
                 fp.write(utils.ensure_bytes(src))

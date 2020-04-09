@@ -376,11 +376,15 @@ class FilePath(text_type):
         """
         return self.name_ext_tuple()[1]
     
-    def dirname(self):
+    def dirname(self, nth = 1):
         """
         このパスのディレクトリ要素を表すパスを得る
         """
-        return self.cls(os.path.dirname(self.fsstr), **self.__dict__)
+        s = self.fsstr
+        while nth > 0:
+            s = os.path.dirname(s)
+            nth -= 1
+        return self.cls(s, **self.__dict__)
     
     def components(self, ensure_abspath = False):
         """
